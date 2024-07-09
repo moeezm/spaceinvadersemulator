@@ -6,144 +6,327 @@
 
 #define pp(...) fprintf(outfile, __VA_ARGS__)
 
-typedef uint8_t uint8;
-typedef uint16_t uint16;
+#include "disassemble.h"
 
-char regs[8] = {'B', 'C', 'D', 'E', 'H', 'L', 'M', 'A'};
+char* regs[8] = {"B", "C", "D", "E", "H", "L", "M", "A"};
 char* dregs[4] = {"BC", "DE", "HL", "PSW"};
 char* ccs[8] = {"NZ", "Z", "NC", "C", "PO", "PE", "P", "N"};
 char* alureg[8] = {"ADD", "ADC", "SUB", "SBB", "ANA", "XRA", "ORA", "CMP"};
 char* aludat[8] = {"ADI", "ACI", "SUI", "SBI", "ANI", "XRI", "ORI", "CPI"};
 
-int disassemble(uint8* buffer, FILE* outfile, int pc) {
-	int opsz = 1;
-	uint8 op = buffer[pc];
-	// pickin out various parts of the opcode
-	// reg1 and reg2 are three bits long, where 8 bits are bb-reg1-reg2
-	// rp is the last two bits of the first nibble
-	// f2 is the first two bits of the opcode
-	// l4 is the second nibble (last 4 bits)
-
-	uint8 reg1 = (op & 0x38) >> 3;
-	uint8 reg2 = (op & 0x7);
-	uint8 rp = (op & 0x30) >> 4;
-	uint8 f2 = (op & 0xC0) >> 6;
-	uint8 l4 = (op & 0xF);
-	// commands wth no parameters
-	switch (op) {
-		case 0x0: pp("NOP"); break;
-		case 0x7: pp("RLC"); break;
-		case 0xF: pp("RRC"); break;
-		case 0x17: pp("RAL"); break;
-		case 0x1F: pp("RAR"); break;
-		case 0x27: pp("DAA"); break;
-		case 0x2F: pp("CMA"); break;
-		case 0x37: pp("STC"); break;
-		case 0x3F: pp("CMC"); break;
-		case 0x76: pp("HLT"); break;
-		case 0xC3: pp("JMP %02X%02X", buffer[pc+2], buffer[pc+1]); opsz += 2; break;
-		case 0xC9: pp("RET"); break;
-		case 0xCD: pp("CALL %02X%02X", buffer[pc+2], buffer[pc+1]); opsz += 2; break;
-		case 0xD3: pp("OUT %02X", buffer[pc+1]); opsz += 1; break;
-		case 0xDB: pp("IN %02X", buffer[pc+1]); opsz += 1; break;
-		case 0xE3: pp("XTHL"); break;
-		case 0xE9: pp("PCHL"); break;
-		case 0xEB: pp("XCHG"); break;
-		case 0xF3: pp("DI"); break;
-		case 0xF9: pp("SPHL"); break;
-		case 0xFB: pp("EI"); break;
-	} 
-	// double-register ops
-	switch (f2) {
-		case 0x0:
-			switch (l4) {
-				case 0x1: pp("LXI %s,%02X%02X", dregs[rp], buffer[pc+2], buffer[pc+1]); opsz += 2; break;
-				case 0x2: pp("STAX %s", dregs[rp]); break;
-				case 0x3: pp("INX %s", dregs[rp]); break;
-				case 0x9: pp("DAD %s", dregs[rp]); break;
-				case 0xA: pp("LDAX %s", dregs[rp]); break;
-				case 0xB: pp("DCX %s", dregs[rp]); break;
-			}
-			break;
-		case 0x3:
-			switch (l4) {
-				case 0x1: pp("POP %s", dregs[rp]); break;
-				case 0x5: pp("PUSH %s", dregs[rp]); break;
-			}
-			break;
-	}
-	// 1 register ops
-	if (f2 == 0) {
-		switch (reg2) {
-			case 0x4: pp("INR %02X", regs[reg1]); break;
-			case 0x5: pp("DCR %02X", regs[reg1]); break;
-			case 0x6: pp("MVI %02X,%02X", regs[reg1], buffer[pc+1]); opsz++; break;
-		}
-	}
-	// MOV
-	if (f2 == 1) {
-		pp("MOV %c,%c", regs[reg1], regs[reg2]);
-	}
-	// status flag (CC) ops
-	if (f2 == 3) {
-		switch (reg2) {
-			case 0x0: pp("R%s", ccs[reg1]); break;
-			case 0x2: pp("J%s %02X%02X", ccs[reg1], buffer[pc+2], buffer[pc+1]); opsz += 2; break;
-			case 0x4: pp("C%s %02X%02X", ccs[reg1], buffer[pc+2], buffer[pc+1]); opsz += 2; break;
-		}
-	}
-	// RST
-	if (f2 == 3 && reg2 == 7) {
-		pp("RST %X", reg1);
-	}
-
-	// w/ data ALU ops
-	if (f2 == 3 && reg2 == 6) {
-		pp("%s %02X", aludat[reg1], buffer[pc+1]);
-		opsz++;
-	}
-	// w/ other reg ALU ops
-	if (f2 == 2) {
-		pp("%s %c", alureg[reg1], regs[reg1]);
-	}
-	pp("\n");
-	return opsz;
+static u16 combine8(u8 lo, u8 hi) {
+	return lo + ((u16)hi << 8);
 }
 
-int main(int argc, char *argv[]) {
-	if (argc != 3) {
-		printf("Usage: ./disassemble INFILE OUTFILE\n");
-		return 1;
+int disassemble8080(FILE* outfile, u8 op, u8 d1, u8 d2, u16 pc) {
+	int opsz = 1;
+	// pickin out various parts of the opcode
+	// reg1 and reg2 are three bits long, where 8 bits are bb-reg1-reg2
+	// rp (register pair) is the last two bits of the first nibble
+	// f2 is the first two bits of the opcode
+	// l4 is the second nibble (last 4 bits)
+	pp("%04X\t", pc);
+	u8 reg1, reg2, rp, f2, l4;
+	reg1 = (op & 0x38) >> 3;
+	reg2 = (op & 0x07);
+	rp = (op & 0x30) >> 4;
+	f2 = (op & 0xC0) >> 6;
+	l4 = (op & 0x0F); 
+	// no parameter ops
+	switch (op) {
+		case 0x00:
+			// NOP
+			pp("NOP \t\t\t\t");
+			goto end;
+		case 0x07:
+		{
+			// RLC
+			pp("RLC \t\t\t\t");
+			goto end; 
+		}
+		case 0x0F: 
+		{
+			// RRC
+			pp("RRC \t\t\t\t");
+			goto end; 
+		}
+		case 0x17:
+		{
+			// RAL
+			pp("RAL \t\t\t\t");
+			goto end; 
+		}
+		case 0x1F:
+		{
+			// RAR
+			pp("RAR \t\t\t\t");
+			goto end; 
+		}
+		case 0x22:
+		{
+			// SHLD add
+			pp("SHLD\t%04X\t\t", combine8(d1, d2));
+			opsz+= 2;
+			goto end; 
+		}
+		case 0x27:
+		{
+			// DAA
+			pp("DAA \t\t\t\t");
+			goto end; 
+		}
+		case 0x2A:
+		{
+			// LHLD add
+			pp("LHLD\t%04X\t\t", combine8(d1, d2)); 
+			opsz+=2; 
+			goto end; 
+		}
+		case 0x2F:
+		{
+			// CMA
+			pp("CMA \t\t\t\t");
+			goto end; 
+		}
+		case 0x32:
+		{
+			// STA add
+			pp("STA \t%04X\t\t", combine8(d1, d2)); 
+			opsz += 2; 
+			goto end; 
+		}
+		case 0x37:
+		{
+			// STC
+			pp("STC \t\t\t\t");
+			goto end; 
+		}
+		case 0x3A:
+		{
+			// LDA add
+			pp("LDA \t%04X\t\t", combine8(d1, d2));
+			opsz += 2; 
+			goto end; 
+		}
+		case 0x3F:
+		{
+			// CMC
+			pp("CMC \t\t\t\t"); 
+			goto end; 
+		}
+		case 0x76:
+		{
+			// HLT
+			pp("HLT \t\t\t\t");
+			goto end; 
+		}
+		case 0xC3:
+		{
+			// JMP add
+			pp("JMP \t%04X\t\t", combine8(d1, d2));
+			opsz += 2; 
+			goto end; 
+		}
+		case 0xC9:
+		{
+			// RET
+			pp("RET \t\t\t\t");
+			goto end; 
+		}
+		case 0xCD:
+		{
+			// CALL add
+			pp("CALL\t%04X\t\t", combine8(d1, d2));
+			opsz += 2; 
+			goto end; 
+		}
+		case 0xD3:
+		{
+			// OUT port
+			pp("OUT \t%02X  \t\t", d1); 
+			opsz++; 
+			goto end; 
+		}
+		case 0xDB:
+		{
+			// IN port
+			pp("IN  \t%02X  \t\t", d1);
+			opsz++; 
+			goto end; 
+		}
+		case 0xE3:
+		{
+			// XTHL
+			pp("XTHL\t\t\t\t");
+			goto end; 
+		}
+		case 0xE9:
+		{
+			// PCHL
+			pp("PCHL\t\t\t\t");
+			goto end; 
+		}
+		case 0xEB:
+		{
+			// XCHG
+			pp("XCHG\t\t\t\t"); 
+			goto end; 
+		}
+		case 0xF3:
+		{
+			// DI
+			pp("DI  \t\t\t\t"); 
+			goto end; 
+		}
+		case 0xF9:
+		{
+			// SPHL
+			pp("SPHL\t\t\t\t"); 
+			goto end; 
+		}
+		case 0xFB:
+		{
+			// EI
+			pp("EI  \t\t\t\t"); 
+			goto end; 
+		}
 	}
-	FILE *infile = fopen(argv[1], "r");
-	if (infile == NULL) {
-		perror("Error opening input file");
-		return 1;
+	// 16-bit (i.e. double) register operations
+	switch (f2) {
+		case 0:
+			switch (l4) {
+				case 0x1:
+				{
+					// LXI rp, data
+					pp("LXI \t%-4s\t%02X  ", dregs[rp], combine8(d1, d2));
+					opsz += 2;
+					goto end; 
+				}
+				case 0x2:
+				{
+					// STAX rp
+					pp("STAX \t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+				case 0x3:
+				{
+					// INX rp
+					pp("INX \t%-4s\t\t", dregs[rp]); 
+					goto end; 
+				}
+				case 0x9:
+				{
+					// DAD rp
+					pp("DAD \t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+				case 0xA:
+				{
+					// LDAX rp
+					pp("LDAX \t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+				case 0xB:
+				{
+					// DCX rp
+					pp("DCX \t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+			}
+			break;
+		case 3:
+			switch (l4) {
+				case 0x1:
+				{
+					// POP rp
+					pp("POP \t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+				case 0x5:
+				{
+					// PUSH rp
+					pp("PUSH\t%-4s\t\t", dregs[rp]);
+					goto end; 
+				}
+			}
+			break;
 	}
-	FILE *outfile = fopen(argv[2], "w");
-	if (outfile == NULL) {
-		perror("Error opening output file");
-		return 1;
+	// for single width (8 bit) registers, register 0b110 (0x6) (REG_M) is the value at address stored in HL
+	// move register to register
+	if (f2 == 1) {
+		// MOV r1, r2
+		pp("MOV \t%-3s,\t%-4s", regs[reg1], regs[reg1]); 
+		goto end; 
 	}
-	fseek(infile, 0, SEEK_END);
-	int insize = ftell(infile);
-	fseek(infile, 0, SEEK_SET);
-	printf("Read: %d bytes\n", insize);
-	uint8 *buffer = malloc(insize);
-	if (buffer == NULL) {
-		perror("Error allocating memory for file");
-		return 1;
+	// single register operations
+	if (f2 == 0) {
+		switch (reg2) {
+			case 0x4:
+			{
+				// INR r1
+				pp("INR \t%-4s\t\t", regs[reg1]);
+				goto end; 
+			}
+			case 0x5:
+			{
+				// DCR r1
+				pp("DCR \t%-4s\t\t", regs[reg1]);
+				goto end; 
+			}
+			case 0x6:
+			{
+				// MVI r1, data
+				pp("MVI \t%-4s,\t%02X  ", regs[reg1], d1);
+				opsz++; 
+				goto end; 
+			}
+		}
 	}
-
-	fread(buffer, 1, insize, infile);
-	int pc = 0;
-	while (pc < insize) {
-		pp("%04X\t", pc);
-		pc += disassemble(buffer, outfile, pc);
+	// Reset(?) instruction
+	// used for interrupts 
+	if (f2 == 3 && reg2 == 7) {
+		// RST n
+		pp("RST \t%X   \t\t", reg1);
+		goto end; 
 	}
-
-	free(buffer);
-	fclose(infile);
-	fclose(outfile);
-	return 0;
+	// CC (conditional) instructions
+	if (f2 == 3) {
+		switch (reg2) {
+			case 0:
+			{
+				// Rcc
+				pp("R%-3s\t\t\t\t", ccs[reg1]);
+				goto end; 
+			}
+			case 2:
+			{
+				// Jcc ADD
+				pp("J%-3s\t%04X\t\t", ccs[reg1], combine8(d1, d2));
+				opsz += 2;
+				goto end; 
+			}
+			case 4:
+			{
+				// Ccc ADD
+				pp("C%-3s\t%04X\t\t", ccs[reg1], combine8(d1, d2));
+				opsz += 2;
+				goto end;
+			}
+		}
+	}
+	// ALU operations
+	// with register
+	if (f2 == 2) {
+		pp("%-4s\t%-4s\t\t", alureg[reg1], regs[reg2]);
+		goto end;
+	}
+	// immediate value ALU
+	if (f2 == 3 && reg2 == 6) {
+		pp("%-4s\t%02X  \t\t", aludat[reg1], d1);
+		opsz += 1;
+		goto end;
+	}
+	pp("!%03X\t\t\t\t", op);
+end:
+	return opsz;
 }

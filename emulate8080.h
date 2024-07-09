@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 #define MEM_SZ (1<<16)
-#define CLOCK_SPEED 1000000
+#define CLOCK_SPEED 2000000
 typedef uint8_t u8;
 typedef uint16_t u16;
 
@@ -34,6 +34,6 @@ State8080* initState8080();
 void writeMem(State8080* state, u16 addr, u8 val);
 void generateInterrupt(State8080* state, u8 opcode, u8 data1, u8 data2);
 int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2);
-int nextOp(State8080* state, Machine* machine);
+int nextOp8080(State8080* state, Machine* machine);
 void run8080(State8080* state, Machine* machine);
 #endif

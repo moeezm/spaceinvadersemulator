@@ -5,17 +5,20 @@
 #include <errno.h>
 #include <unistd.h>
 
+#include "disassemble.h"
 #include "emulate8080.h"
 #include "machine.h"
 #include "platform.h"
 
-#define DEBUG false 
+#define DEBUG true 
+
+FILE* outfile; 
 
 State8080* initState8080() {
 	State8080* state = malloc(sizeof(State8080));
 	memset(state->memory, 0, MEM_SZ);
 	memset(state->regs, 0, 8);
-	state->psw = 0;
+	state->psw = 2;
 	state->sp = 0;
 	state->halted = false;
 	state->interrupted = false;
@@ -29,23 +32,41 @@ State8080* initState8080() {
 }
 
 void writeMem(State8080* state, u16 addr, u8 val) {
-	//if (addr < 0x2000) {
-//		printf("Cannot write address %X (ROM is addresses < 0x2000) (PC: %X)\n", addr, state->pc);
-	//}
-	//else {
+	if (addr < 0x2000) {
+		printf("Cannot write address %X (ROM is addresses < 0x2000) (PC: %X)\n", addr, state->pc);
+	}
+	else {
 		state->memory[addr] = val;
-	//}
+	}
 }
 
 void generateInterrupt(State8080* state, u8 opcode, u8 data1, u8 data2) {
-	printf("interrupted!\n");
 	state->interruptbus[0] = opcode;
 	state->interruptbus[1] = data1;
 	state->interruptbus[2] = data2;
+	state->interrupted = true;
 }
 
 u16 combine8(u8 lo, u8 hi) {
 	return lo + ((u16)hi << 8);
+}
+
+void push8(State8080* state, u8 val) {
+	writeMem(state, --state->sp, val);
+}
+void push16(State8080* state, u16 val) {
+	// push hi then lo
+	push8(state, (u8)((val & 0xFF00) >> 8));
+	push8(state, (u8)(val & 0xFF));
+}
+
+u8 pop8(State8080* state) {
+	return state->memory[state->sp++];
+}
+u16 pop16(State8080* state) {
+	u16 ans = combine8(state->memory[state->sp], state->memory[state->sp+1]);
+	state->sp += 2;
+	return ans;
 }
 
 // rp = 0b11 can be either SP or PSW (A + status)
@@ -73,11 +94,11 @@ void setFlag(State8080* state, enum Flag f, u8 b) {
 	state->psw = (state->psw & ~(1<<(int)f)) | (b<<(int)f);
 }
 int getFlag(State8080* state, enum Flag f) {
-	return (state->psw & (1<<(int)f)) >> (int)f;
+	return (state->psw >> (int)f) & 1;
 }
 
 void setSign(State8080* state, u8 val) {
-	setFlag(state, FLAG_S, (val & (1<<7))>>7);
+	setFlag(state, FLAG_S, (val>>7)&1);
 }
 void setZero(State8080* state, u8 val) {
 	setFlag(state, FLAG_Z, val == 0);
@@ -173,13 +194,13 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 	// rp (register pair) is the last two bits of the first nibble
 	// f2 is the first two bits of the opcode
 	// l4 is the second nibble (last 4 bits)
-	// d1 and d2 are the 
 	u8 reg1, reg2, rp, f2, l4;
 	reg1 = (op & 0x38) >> 3;
 	reg2 = (op & 0x07);
 	rp = (op & 0x30) >> 4;
 	f2 = (op & 0xC0) >> 6;
 	l4 = (op & 0x0F); 
+	bool wasinterrupted = state->interrupted;
 	// no parameter ops
 	switch (op) {
 		case 0x00:
@@ -306,9 +327,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 		{
 			// RET
 			// pop off stack into pc
-			u8 pclo = state->memory[state->sp++];
-			u8 pchi = state->memory[state->sp++];
-			state->pc = combine8(pclo, pchi);
+			state->pc = pop16(state);
 			return 10;
 		}
 		case 0xCD:
@@ -316,8 +335,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// CALL add
 			// push pc onto to stack, jump to add
 			state->pc += 2;
-			writeMem(state, state->sp--, (state->pc & 0xFF00) >> 8);
-			writeMem(state, state->sp--, (state->pc & 0x00FF));
+			push16(state, state->pc);
 			state->pc = combine8(d1, d2);
 			return 17;
 		}
@@ -341,12 +359,10 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 		{
 			// XTHL
 			// exchange HL with top of stack
-			u8 stlo = state->memory[state->sp++];
-			u8 sthi = state->memory[state->sp++];
-			writeMem(state, state->sp--, state->regs[REG_H]);
-			writeMem(state, state->sp--, state->regs[REG_L]);
-			state->regs[REG_H] = sthi;
-			state->regs[REG_L] = stlo;
+			u16 st = pop16(state);
+			push16(state, combine8(state->regs[REG_L], state->regs[REG_H]));
+			state->regs[REG_H] = (st & 0xFF00)>>8;
+			state->regs[REG_L] = (st & 0xFF);
 			return 18;
 		}
 		case 0xE9:
@@ -454,16 +470,16 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 				{
 					// POP rp
 					// pop from stack to rp
-					*dRegLo(state, rp, true) = state->memory[state->sp++];
-					*dRegHi(state, rp, true) = state->memory[state->sp++];
+					*dRegLo(state, rp, true) = pop8(state);
+					*dRegHi(state, rp, true) = pop8(state);
 					return 10;
 				}
 				case 0x5:
 				{
 					// PUSH rp
 					// push rp onto stack
-					writeMem(state, state->sp--, *dRegHi(state, rp, true));
-					writeMem(state, state->sp--, *dRegLo(state, rp, true));
+					push8(state, *dRegHi(state, rp, true));
+					push8(state, *dRegLo(state, rp, true));
 					return 11;
 				}
 			}
@@ -510,26 +526,36 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 				// MVI r1, data
 				// puts 8-bit data in reg1
 				writeReg(state, reg1, d1);
+				state->pc++;
 				return 7;
 			}
 		}
 	}
-	// Restart instruction
+	// Used in interrupts
 	if (f2 == 3 && reg2 == 7) {
 		// RST n
 		// equivalent to CALL at address 8*n
 		
 		// push
-		state->pc += 1;
-		writeMem(state, (state->pc & 0xFF00) >> 8, state->sp--);
-		writeMem(state, state->pc & 0xFF, state->sp--);
+		push16(state, state->pc); 
 
-		state->pc = 8*d1;
+		state->pc = 8*reg1;
 		return 11;
 	}
 	// CC (conditional) instructions
 	if (f2 == 3) {
 		switch (reg2) {
+			case 0:
+			{
+				// Rcc
+				// if condition is true return
+				int shika = 5;
+				if (evaluateCC(state, reg1)) {
+					state->pc = pop16(state);
+					shika = 11; 
+				}
+				return shika;
+			}
 			case 2:
 			{
 				// Jcc ADD
@@ -544,8 +570,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 				// if cc is true, call 16-bit address
 				state->pc += 2;
 				if (evaluateCC(state, reg1)) {
-					writeMem(state, (state->pc & 0xFF00) >> 8, state->sp--);
-					writeMem(state, (state->pc & 0xFF), state->sp--);
+					push16(state, state->pc);
 					state->pc = combine8(d1, d2);
 				}
 				return 11;
@@ -600,6 +625,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 	}
 	// immediate value ALU
 	if (f2 == 3 && reg2 == 6) {
+		state->pc++;
 		switch (reg1) {
 			case 0:
 			{
@@ -643,7 +669,6 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			}
 		}
 	}
-	printf("Error interpreting opcode %X at location %X\n", op, state->pc-1);
 	state->on = false;
 	return 10000;
 }
@@ -651,6 +676,12 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 int nextOp8080(State8080* state, Machine* machine) {
 	u8 op, d1, d2;
 	op = d1 = d2 = 0;
+	if (state->pc == 0xFFFF) {
+		state->on = false;
+		printf("SHIKA\n");
+		return 10000;
+	}
+	bool wasinterrupted = false;
 	if (!state->interrupted || !state->interruptsEnabled) {
 		if (state->halted) return 1;
 		op = state->memory[state->pc];
@@ -660,23 +691,34 @@ int nextOp8080(State8080* state, Machine* machine) {
 		state->pc++;
 	}
 	else {
+		wasinterrupted = true;
 		op = state->interruptbus[0];
 		d1 = state->interruptbus[1];
 		d2 = state->interruptbus[2];
 	}
-	if (DEBUG) printf("PC: %X, OP: %X, D1: %X, D2: %X\n", state->pc, op, d1, d2);
+	//if (DEBUG) printf("PC: %X, OP: %X, D1: %X, D2: %X\n", state->pc - (int)(!wasinterrupted), op, d1, d2);
+	if (DEBUG) {
+		fprintf(outfile, "INT?:%d\t", wasinterrupted);
+		disassemble8080(outfile, op, d1, d2, state->pc - (int)(!wasinterrupted));
+		fprintf(outfile, "\t%02X\t%04X\t%02X", state->psw, state->sp, state->memory[state->sp]);
+		fprintf(outfile, "\n");
+	}
 	
+	int ans = emulateOp8080(state, machine, op, d1, d2);
 	// clear interruptbus since interrupts should not
 	// be queued
 	state->interruptbus[0] = 0;
 	state->interruptbus[1] = 0;
 	state->interruptbus[2] = 0;
-	return emulateOp8080(state, machine, op, d1, d2);
+	state->interrupted = false;
+	return ans;
 }
 
 const int CYCLES_PER_MILLISECOND = CLOCK_SPEED / 1000;
 
 void run8080(State8080* state, Machine* machine) {
+	outfile = fopen("pgdump", "wb");
+	//outfile = stdout; 
 	int cycles;
 	int64_t last;
 	while (state->on) {
@@ -693,4 +735,5 @@ void run8080(State8080* state, Machine* machine) {
 			printf("Cycle took too long: %ld microseconds\n", delta);
 		}
 	}
+	if (outfile != stdout) fclose(outfile);
 }

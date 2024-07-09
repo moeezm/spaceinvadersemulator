@@ -1,1 +1,5 @@
 *.out
+disassemble-old.c
+memdump
+pgdump
+test.c

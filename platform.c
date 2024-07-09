@@ -120,12 +120,15 @@ int main() {
 	pthread_t thread;
 	pthread_create(&thread, NULL, cpuThreadWrapper, NULL);
 	const uint64_t MICROSECONDS_PER_FRAME = 1000000 / FPS;
-	uint64_t lastHalf = 0;
-	uint64_t lastFull = MICROSECONDS_PER_FRAME / 2;
+	uint64_t lastHalf = currMicro();
+	uint64_t lastFull = lastHalf + MICROSECONDS_PER_FRAME / 2;
 	uint64_t curr;
 
 	u8 vRamCopy[SCREEN_WIDTH][SCREEN_HEIGHT/8];
-	int rotScreen[SCREEN_HEIGHT][SCREEN_WIDTH];
+	static int rotScreen[SCREEN_HEIGHT][SCREEN_WIDTH];
+	memset(vRamCopy, 0, sizeof(vRamCopy));
+	memset(rotScreen, 0, sizeof(rotScreen));
+	assert(sizeof(vRamCopy) == SCREEN_HEIGHT * SCREEN_WIDTH / 8); 
 	while (running) {
 		while (SDL_PollEvent(&e)) switch (e.type) {
 			case SDL_QUIT:
@@ -160,5 +163,9 @@ int main() {
 		}
 	}
 	cleanWindow();
+	// dump memory
+	FILE* f = fopen("memdump", "wb");
+	fwrite(cpu->memory, 1, MEM_SZ, f);
+	fclose(f);
 	return 0;
 }

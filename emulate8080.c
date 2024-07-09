@@ -56,7 +56,7 @@ void push8(State8080* state, u8 val) {
 }
 void push16(State8080* state, u16 val) {
 	// push hi then lo
-	push8(state, (u8)((val & 0xFF00) >> 8));
+	push8(state, (u8)(val>>8 & 0xFF));
 	push8(state, (u8)(val & 0xFF));
 }
 
@@ -123,16 +123,16 @@ void setNonCarryFlags(State8080* state, u8 val) {
 
 // ALU ops
 u8 ALUadd(State8080* state, u8 x1, u8 x2, u8 carry) {
-	setFlag(state, FLAG_C, (x2+carry > 0xFF-x1));
-	setFlag(state, FLAG_AC, x2 + carry > 0xF - (x1 & 0x0F));
+	setFlag(state, FLAG_C, ((u16)x2+(u16)carry > 0xFF-x1));
+	setFlag(state, FLAG_AC, (u16)x2 + (u16)carry > 0xF - (x1 & 0x0F));
 	u8 y = x1 + x2 + carry;
 	setNonCarryFlags(state, y);
 	return y;
 }
 
 u8 ALUsub(State8080* state, u8 x1, u8 x2, u8 carry) {
-	setFlag(state, FLAG_C, x2+carry > x1);
-	setFlag(state, FLAG_AC, x2 + carry > (x1 & 0x0F));
+	setFlag(state, FLAG_C, (u16)x2+(u16)carry > x1);
+	setFlag(state, FLAG_AC, (u16)x2 + (u16)carry > (x1 & 0x0F));
 	u8 y = x1 - x2 - carry;
 	setNonCarryFlags(state, y);
 	return y;
@@ -149,7 +149,7 @@ u8 ALUand(State8080* state, u8 x1, u8 x2, bool affectAC) {
 u8 ALUxor(State8080* state, u8 x1, u8 x2) {
 	setFlag(state, FLAG_C, 0);
 	setFlag(state, FLAG_AC, 0);
-	u8 y = x1 & x2;
+	u8 y = x1 ^ x2;
 	setNonCarryFlags(state, y);
 	return y;
 }
@@ -157,7 +157,7 @@ u8 ALUxor(State8080* state, u8 x1, u8 x2) {
 u8 ALUor(State8080* state, u8 x1, u8 x2) {
 	setFlag(state, FLAG_C, 0);
 	setFlag(state, FLAG_AC, 0);
-	u8 y = x1 & x2;
+	u8 y = x1 | x2;
 	setNonCarryFlags(state, y);
 	return y;
 }
@@ -210,10 +210,11 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 		{
 			// RLC
 			// left shift on A, first bit and carry set to prev 7th bit
-			setFlag(state, FLAG_C, (state->regs[REG_A]>>7 & 0x80));
-			// set 0th bit to 7th bit
-			state->regs[REG_A] = (state->regs[REG_A] & ~1) | (state->regs[REG_A]>>7 & 0x80);
+			u8 a7 = state->regs[REG_A]>>7 & 1;
+			setFlag(state, FLAG_C, a7);
 			state->regs[REG_A] <<= 1;
+			// set 0th bit to 7th bit
+			state->regs[REG_A] = (state->regs[REG_A] & ~1) | a7;
 			return 4;
 		}
 		case 0x0F: 
@@ -222,26 +223,28 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// right shift version of RLC
 			u8 a0 = (state->regs[REG_A] & 1);
 			setFlag(state, FLAG_C, a0);
-			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | a0;
 			state->regs[REG_A] >>= 1;
+			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | a0;
 			return 4;
 		}
 		case 0x17:
 		{
 			// RAL
 			// left shit on A, carry goes to first bit, last bit goes to carry
-			state->regs[REG_A] = (state->regs[REG_A] & ~1) | getFlag(state, FLAG_C);
+			u8 cry = getFlag(state, FLAG_C);
 			setFlag(state, FLAG_C, state->regs[REG_A]>>7 & 1);
 			state->regs[REG_A] <<= 1;
+			state->regs[REG_A] = (state->regs[REG_A] & ~1) | cry;
 			return 4;
 		}
 		case 0x1F:
 		{
 			// RAR
 			// right shift version of RAL
-			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | getFlag(state, FLAG_C);
+			u8 cry = getFlag(state, FLAG_C);
 			setFlag(state, FLAG_C, state->regs[REG_A] & 1);
 			state->regs[REG_A] >>= 1;
+			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | cry;
 			return 4;
 		}
 		case 0x22:
@@ -260,7 +263,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// If low nibble of A is > 9 OR AC == 1 then A += 6
 			// then if high nibble of A is > 9 OR Cy == 1 then A += 0x60
 			if ((state->regs[REG_A] & 0x0F) > 9 || getFlag(state, FLAG_AC)) state->regs[REG_A] += 6;
-			if ((state->regs[REG_A] & 0xF0)>>4 > 9 || getFlag(state, FLAG_C)) state->regs[REG_A] += 0x60;
+			if ((state->regs[REG_A]>>4 & 0x0F) > 9 || getFlag(state, FLAG_C)) state->regs[REG_A] += 0x60;
 			return 4;
 		}
 		case 0x2A:
@@ -361,8 +364,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// exchange HL with top of stack
 			u16 st = pop16(state);
 			push16(state, combine8(state->regs[REG_L], state->regs[REG_H]));
-			state->regs[REG_H] = (st & 0xFF00)>>8;
-			state->regs[REG_L] = (st & 0xFF);
+			state->regs[REG_H] = st>>8 & 0xFF;
+			state->regs[REG_L] = st & 0xFF;
 			return 18;
 		}
 		case 0xE9:
@@ -441,8 +444,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 					// !! maps x != 0 to 1 and x == 0 to 0
 					setFlag(state, FLAG_C, !!(ans/(1<<16)));
 					ans &= (1<<16)-1; // mod
-					state->regs[REG_L] = ans & (0xFF);
-					state->regs[REG_H] = (ans & 0xFF00) >> 8;
+					state->regs[REG_L] = ans & 0xFF;
+					state->regs[REG_H] = ans>>8 & 0xFF;
 					return 10;
 				}
 				case 0xA:
@@ -676,11 +679,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 int nextOp8080(State8080* state, Machine* machine) {
 	u8 op, d1, d2;
 	op = d1 = d2 = 0;
-	if (state->pc == 0xFFFF) {
-		state->on = false;
-		printf("SHIKA\n");
-		return 10000;
-	}
+	u16 oldpc = state->pc;
 	bool wasinterrupted = false;
 	if (!state->interrupted || !state->interruptsEnabled) {
 		if (state->halted) return 1;
@@ -699,12 +698,13 @@ int nextOp8080(State8080* state, Machine* machine) {
 	//if (DEBUG) printf("PC: %X, OP: %X, D1: %X, D2: %X\n", state->pc - (int)(!wasinterrupted), op, d1, d2);
 	if (DEBUG) {
 		fprintf(outfile, "INT?:%d\t", wasinterrupted);
-		disassemble8080(outfile, op, d1, d2, state->pc - (int)(!wasinterrupted));
+		disassemble8080(outfile, op, d1, d2, oldpc);
 		fprintf(outfile, "\t%02X\t%04X\t%02X", state->psw, state->sp, state->memory[state->sp]);
 		fprintf(outfile, "\n");
 	}
 	
 	int ans = emulateOp8080(state, machine, op, d1, d2);
+	if (ans == 10000) printf("bad instruction at %X\n", oldpc);
 	// clear interruptbus since interrupts should not
 	// be queued
 	state->interruptbus[0] = 0;
@@ -719,7 +719,7 @@ const int CYCLES_PER_MILLISECOND = CLOCK_SPEED / 1000;
 void run8080(State8080* state, Machine* machine) {
 	outfile = fopen("pgdump", "wb");
 	//outfile = stdout; 
-	int cycles;
+	uint64_t cycles;
 	int64_t last;
 	while (state->on) {
 		cycles = 0;

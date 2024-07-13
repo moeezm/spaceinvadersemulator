@@ -4,17 +4,33 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "disassemble.h"
 #include "emulate8080.h"
 #include "machine.h"
 #include "platform.h"
 
-#define DEBUG true 
+#define ROM_SIZE 0x10000
 
-FILE* outfile; 
+FILE* pclogFile;
+FILE* disassembleFile;
+
+char disassembledProgram[ROM_SIZE][50];
+int opsizes[ROM_SIZE];
+
+u8 parityLookup[256];
 
 State8080* initState8080() {
+	for (int i = 0; i < 256; i++) {
+		u8 ans = 1;
+		u8 j = i;
+		while (j > 0) {
+			ans ^= (j & 1);
+			j >>= 1;
+		}
+		parityLookup[i] = ans;
+	}
 	State8080* state = malloc(sizeof(State8080));
 	memset(state->memory, 0, MEM_SZ);
 	memset(state->regs, 0, 8);
@@ -31,13 +47,13 @@ State8080* initState8080() {
 	return state;
 }
 
-void writeMem(State8080* state, u16 addr, u8 val) {
-	if (addr < 0x2000) {
-		printf("Cannot write address %X (ROM is addresses < 0x2000) (PC: %X)\n", addr, state->pc);
-	}
-	else {
+static inline void writeMem(State8080* state, u16 addr, u8 val) {
+	//if (SPACE_INVADERS_MEM_SAFETY && addr < 0x2000) {
+//		printf("Cannot write address %X (ROM is addresses < 0x2000) (PC: %X)\n", addr, state->pc);
+//	}
+//	else {
 		state->memory[addr] = val;
-	}
+//	}
 }
 
 void generateInterrupt(State8080* state, u8 opcode, u8 data1, u8 data2) {
@@ -47,26 +63,26 @@ void generateInterrupt(State8080* state, u8 opcode, u8 data1, u8 data2) {
 	state->interrupted = true;
 }
 
-u16 combine8(u8 lo, u8 hi) {
-	return lo + ((u16)hi << 8);
+static inline u16 combine8(u8 lo, u8 hi) {
+	return (u16)hi<<8 | lo;
 }
 
-void push8(State8080* state, u8 val) {
+int stack_size = 0;
+static inline void push8(State8080* state, u8 val) {
 	writeMem(state, --state->sp, val);
 }
-void push16(State8080* state, u16 val) {
-	// push hi then lo
+static inline void push16(State8080* state, u16 val) {
 	push8(state, (u8)(val>>8 & 0xFF));
 	push8(state, (u8)(val & 0xFF));
 }
 
-u8 pop8(State8080* state) {
+static inline u8 pop8(State8080* state) {
 	return state->memory[state->sp++];
 }
-u16 pop16(State8080* state) {
-	u16 ans = combine8(state->memory[state->sp], state->memory[state->sp+1]);
-	state->sp += 2;
-	return ans;
+static inline u16 pop16(State8080* state) {
+	u8 lo = pop8(state);
+	u8 hi = pop8(state);
+	return combine8(lo, hi);
 }
 
 // rp = 0b11 can be either SP or PSW (A + status)
@@ -81,39 +97,37 @@ u8* dRegLo(State8080* state, u8 rp, bool psw) {
 	else return (u8*)(&(state->sp));
 }
 
-u8 readReg(State8080* state, int reg) {
+static inline u8 readReg(State8080* state, int reg) {
 	if (reg == REG_M) return state->memory[combine8(readReg(state, REG_L), readReg(state, REG_H))];
 	else return state->regs[reg];
 }
-void writeReg(State8080* state, int reg, u8 val) {
+static inline void writeReg(State8080* state, int reg, u8 val) {
 	if (reg == REG_M) writeMem(state, combine8(readReg(state, REG_L), readReg(state, REG_H)), val);
 	else state->regs[reg] = val;
 }
 // b 0 or 1
-void setFlag(State8080* state, enum Flag f, u8 b) {
-	state->psw = (state->psw & ~(1<<(int)f)) | (b<<(int)f);
+static inline void setFlag(State8080* state, enum Flag f, u8 b) {
+	state->psw = (state->psw & ~(1<<f)) | (b<<f);
 }
-int getFlag(State8080* state, enum Flag f) {
-	return (state->psw >> (int)f) & 1;
+static inline int getFlag(State8080* state, enum Flag f) {
+	return (state->psw >> f) & 1;
 }
 
-void setSign(State8080* state, u8 val) {
-	setFlag(state, FLAG_S, (val>>7)&1);
+static inline void setSign(State8080* state, u8 val) {
+	setFlag(state, FLAG_S, (val>>7));
 }
-void setZero(State8080* state, u8 val) {
+static inline void setZero(State8080* state, u8 val) {
 	setFlag(state, FLAG_Z, val == 0);
 }
-void setParity(State8080* state, u8 val) {
+static inline void setParity(State8080* state, u8 val) {
+	/*
 	u8 ans = 1;
 	while (val > 0) {
 		ans ^= (val & 1);
 		val >>= 1;
 	}
-	setFlag(state, FLAG_P, ans);
-}
-void setAC(State8080* state, u16 inp, u16 outp) {
-	// if the numbers except for the low nibble are different then a carry or borrow took place
-	setFlag(state, FLAG_AC, (inp & ~0xF) != (outp & ~0xF));
+	*/
+	setFlag(state, FLAG_P, parityLookup[val]);
 }
 void setNonCarryFlags(State8080* state, u8 val) {
 	setSign(state, val);
@@ -122,25 +136,40 @@ void setNonCarryFlags(State8080* state, u8 val) {
 }
 
 // ALU ops
-u8 ALUadd(State8080* state, u8 x1, u8 x2, u8 carry) {
-	setFlag(state, FLAG_C, ((u16)x2+(u16)carry > 0xFF-x1));
-	setFlag(state, FLAG_AC, (u16)x2 + (u16)carry > 0xF - (x1 & 0x0F));
-	u8 y = x1 + x2 + carry;
+static inline u8 ALUadd(State8080* state, u8 x1, u8 x2, u8 carry) {
+	setFlag(state, FLAG_C, ((u16)x2+(u16)carry + (u16)x1 > 0xFF));
+	setFlag(state, FLAG_AC, (((x1 & 0xF) + (x2 & 0xF) + carry) & 0x10));
+	u8 y = (x1 + x2 + carry) & 0xFF;
 	setNonCarryFlags(state, y);
 	return y;
 }
 
-u8 ALUsub(State8080* state, u8 x1, u8 x2, u8 carry) {
+static inline u8 ALUsub(State8080* state, u8 x1, u8 x2, u8 carry) {
 	setFlag(state, FLAG_C, (u16)x2+(u16)carry > x1);
-	setFlag(state, FLAG_AC, (u16)x2 + (u16)carry > (x1 & 0x0F));
-	u8 y = x1 - x2 - carry;
+	//setFlag(state, FLAG_AC, (x2 & 0xF) + (carry & 0xF) > (x1 & 0xF));
+	u8 y = (x1 - x2 - carry) & 0xFF;
 	setNonCarryFlags(state, y);
 	return y;
+	/*
+	some bs i stole from another guy's emulator cause i still don't understand how AC works in subtractions
+
+	u8 x2_ones = (~x2) & 0xFF;
+
+	u16 res16 = (u16)x1 + (u16)x2_ones + (u16)(carry ? 0 : 1);
+	u8 res8 = res16 & 0xFF;
+
+	setFlag(state, FLAG_C, !(res16 & 0x100));
+	setFlag(state, FLAG_AC, (((x1 & 0xF) + (x2_ones & 0xF) + (carry ? 0 : 1)) & 0x10)>>4);
+	setNonCarryFlags(state, res8);
+	*/
+	//printf("%X %X %X %X %X %X %X %X\n", x1, x2, carry, x2_ones, res16, res8, getFlag(state, FLAG_C), getFlag(state, FLAG_AC));
+	//return res8;
 }
 
 u8 ALUand(State8080* state, u8 x1, u8 x2, bool affectAC) {
 	setFlag(state, FLAG_C, 0);
-	setFlag(state, FLAG_AC, affectAC & ( (x1&(1<<3))>>3 | (x2&(1<<3))>>3 ));
+	// LMAO
+	setFlag(state, FLAG_AC, affectAC & ((x1|x2)>>3));
 	u8 y = x1 & x2;
 	setNonCarryFlags(state, y);
 	return y;
@@ -190,22 +219,25 @@ bool evaluateCC(State8080* state, u8 cc) {
 // return is number of cycles taken
 int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 	// pickin out various parts of the opcode
+	// "b" is an arbitrary bit in what follows
 	// reg1 and reg2 are three bits long, where 8 bits are bb-reg1-reg2
-	// rp (register pair) is the last two bits of the first nibble
-	// f2 is the first two bits of the opcode
-	// l4 is the second nibble (last 4 bits)
+	// rp (register pair) is the last two bits of the first nibble (bb-rp-bbbb)
+	// f2 is the first two bits of the opcode (f2-bb-bbbb)
+	// l4 is the second nibble (last 4 bits) (bbbb-l4);
 	u8 reg1, reg2, rp, f2, l4;
-	reg1 = (op & 0x38) >> 3;
-	reg2 = (op & 0x07);
-	rp = (op & 0x30) >> 4;
-	f2 = (op & 0xC0) >> 6;
-	l4 = (op & 0x0F); 
-	bool wasinterrupted = state->interrupted;
+	reg1 = op >> 3 & 7;
+	reg2 = op & 7;
+	rp = op >> 4 & 3;
+	f2 = op >> 6 & 3;
+	l4 = op & 0xF;
+	
 	// no parameter ops
 	switch (op) {
 		case 0x00:
+		{
 			// NOP
 			return 4;
+		}
 		case 0x07:
 		{
 			// RLC
@@ -224,7 +256,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			u8 a0 = (state->regs[REG_A] & 1);
 			setFlag(state, FLAG_C, a0);
 			state->regs[REG_A] >>= 1;
-			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | a0;
+			state->regs[REG_A] = state->regs[REG_A] | (a0<<7);
 			return 4;
 		}
 		case 0x17:
@@ -244,7 +276,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			u8 cry = getFlag(state, FLAG_C);
 			setFlag(state, FLAG_C, state->regs[REG_A] & 1);
 			state->regs[REG_A] >>= 1;
-			state->regs[REG_A] = (state->regs[REG_A] & ~(1<<7)) | cry;
+			state->regs[REG_A] = state->regs[REG_A] | (cry << 7); 
 			return 4;
 		}
 		case 0x22:
@@ -262,8 +294,19 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// DAA
 			// If low nibble of A is > 9 OR AC == 1 then A += 6
 			// then if high nibble of A is > 9 OR Cy == 1 then A += 0x60
-			if ((state->regs[REG_A] & 0x0F) > 9 || getFlag(state, FLAG_AC)) state->regs[REG_A] += 6;
-			if ((state->regs[REG_A]>>4 & 0x0F) > 9 || getFlag(state, FLAG_C)) state->regs[REG_A] += 0x60;
+			//return 4;
+			if ((state->regs[REG_A] & 0x0F) > 9 || getFlag(state, FLAG_AC)) {
+				u8 oldcy = getFlag(state, FLAG_C);
+				u8 oldac = getFlag(state, FLAG_AC);
+				state->regs[REG_A] = ALUadd(state, state->regs[REG_A], 6, 0);
+				setFlag(state, FLAG_C, oldcy);
+			}
+
+			if ((state->regs[REG_A]>>4 & 0x0F) > 9 || getFlag(state, FLAG_C)) {
+				u8 oldcy = getFlag(state, FLAG_C);
+				state->regs[REG_A] = ALUadd(state, state->regs[REG_A], 0x60, 0);
+				if (oldcy == 1) setFlag(state, FLAG_C, oldcy);
+			}
 			return 4;
 		}
 		case 0x2A:
@@ -347,6 +390,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// OUT port
 			// put A in port
 			writePort(machine, d1, state->regs[REG_A]);
+			//writePort2(d1, state->regs[REG_A]);
 			state->pc += 1;
 			return 10;
 		}
@@ -355,6 +399,7 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 			// IN port
 			// read from port into A
 			state->regs[REG_A] = readPort(machine, d1);
+			//state->regs[REG_A] = readPort2(d1);
 			state->pc += 1;
 			return 10;
 		}
@@ -440,9 +485,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 					// DAD rp
 					// HL += rp
 					// only carry flag is affected
-					int ans = (int)combine8(state->regs[REG_L], state->regs[REG_H]) + (int)combine8(*dRegLo(state, rp, false), *dRegHi(state, rp, false));
-					// !! maps x != 0 to 1 and x == 0 to 0
-					setFlag(state, FLAG_C, !!(ans/(1<<16)));
+					unsigned int ans = (unsigned int)combine8(state->regs[REG_L], state->regs[REG_H]) + (unsigned int)combine8(*dRegLo(state, rp, false), *dRegHi(state, rp, false));
+					setFlag(state, FLAG_C, ans >= (1<<16));
 					ans &= (1<<16)-1; // mod
 					state->regs[REG_L] = ans & 0xFF;
 					state->regs[REG_H] = ans>>8 & 0xFF;
@@ -475,6 +519,11 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 					// pop from stack to rp
 					*dRegLo(state, rp, true) = pop8(state);
 					*dRegHi(state, rp, true) = pop8(state);
+					if (rp == 3) {
+						// fix fixed bits of psw
+						state->psw = state->psw & ~0x28; // turn off bits 5 and 3
+						state->psw = state->psw | 2; // turn on bit 1 
+					}
 					return 10;
 				}
 				case 0x5:
@@ -508,7 +557,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 				u16 ans = x + 1;
 				u8 y = ans & 0xFF; // mod
 				setNonCarryFlags(state, y);
-				setAC(state, x, ans);
+				setFlag(state, FLAG_AC, (x & 0xF) == 0xF);
+				//setAC(state, x, ans);
 				writeReg(state, reg1, y);
 				return 5;
 			}
@@ -519,7 +569,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 				u16 x = readReg(state, reg1);
 				u16 ans = x - 1;
 				u8 y = ans & 0xFF;
-				setAC(state, x, ans);
+				//setAC(state, x, ans);
+				setFlag(state, FLAG_AC, (x & 0xF) == 0);
 				setNonCarryFlags(state, y);
 				writeReg(state, reg1, y);
 				return 5;
@@ -673,7 +724,8 @@ int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2) {
 		}
 	}
 	state->on = false;
-	return 10000;
+	exit(1);
+	return 0;
 }
 
 int nextOp8080(State8080* state, Machine* machine) {
@@ -685,11 +737,16 @@ int nextOp8080(State8080* state, Machine* machine) {
 		if (state->halted) return 1;
 		op = state->memory[state->pc];
 		// d1 and d2 are data
-		if (op < MEM_SZ-1) d1 = state->memory[state->pc+1];
-		if (op < MEM_SZ-2) d2 = state->memory[state->pc+2];
+		d1 = state->memory[state->pc + 1];
+		d2 = state->memory[state->pc + 2];
+		if (DISASSEMBLE) {
+			opsizes[oldpc] = disassemble8080(disassembledProgram[oldpc], op, d1, d2, oldpc);
+		}
 		state->pc++;
 	}
 	else {
+		state->interruptsEnabled = false;
+		state->halted = false;
 		wasinterrupted = true;
 		op = state->interruptbus[0];
 		d1 = state->interruptbus[1];
@@ -697,14 +754,15 @@ int nextOp8080(State8080* state, Machine* machine) {
 	}
 	//if (DEBUG) printf("PC: %X, OP: %X, D1: %X, D2: %X\n", state->pc - (int)(!wasinterrupted), op, d1, d2);
 	if (DEBUG) {
-		fprintf(outfile, "INT?:%d\t", wasinterrupted);
-		disassemble8080(outfile, op, d1, d2, oldpc);
-		fprintf(outfile, "\t%02X\t%04X\t%02X", state->psw, state->sp, state->memory[state->sp]);
-		fprintf(outfile, "\n");
+		fprintf(pclogFile, "%d\t", wasinterrupted);
+		fprintf(pclogFile, "%04X", oldpc);
+		fprintf(pclogFile, "\t%02X", state->psw);
+		fprintf(pclogFile, "\t%02X %02X", state->memory[state->sp], state->memory[state->sp+1]);
+		fprintf(pclogFile, "\n");
 	}
-	
+
 	int ans = emulateOp8080(state, machine, op, d1, d2);
-	if (ans == 10000) printf("bad instruction at %X\n", oldpc);
+	//if (ans == 10000) printf("bad instruction at %X\n", oldpc);
 	// clear interruptbus since interrupts should not
 	// be queued
 	state->interruptbus[0] = 0;
@@ -714,26 +772,65 @@ int nextOp8080(State8080* state, Machine* machine) {
 	return ans;
 }
 
-const int CYCLES_PER_MILLISECOND = CLOCK_SPEED / 1000;
-
-void run8080(State8080* state, Machine* machine) {
-	outfile = fopen("pgdump", "wb");
-	//outfile = stdout; 
-	uint64_t cycles;
-	int64_t last;
-	while (state->on) {
-		cycles = 0;
-		last = currMicro();
-		while (cycles < CYCLES_PER_MILLISECOND) {
-			cycles += nextOp8080(state, machine);
+void initPcLogFile() {
+	pclogFile = fopen("pclog", "w");
+	// pclogfile = stdout;
+}
+void initDisassembleFile() {
+	disassembleFile = fopen("disprogram", "w");
+}
+void cleanPcLogFile() {
+	printf("hi?\n");
+	if (pclogFile != stdout) fclose(pclogFile);
+}
+void cleanDisassembleFile() {
+	if (disassembleFile != stdout) fclose(disassembleFile);
+}
+void outputDisassembly() {
+	bool empty = false;
+	for (int i = 0; i < ROM_SIZE; i += opsizes[i]) {
+		if (opsizes[i] == 0) opsizes[i] = 1;
+		if (!empty && disassembledProgram[i][0] == '\0') {
+			empty = true;
+			fprintf(disassembleFile, "%04X..", i);
 		}
-		uint64_t delta = currMicro() - last;
-		if (delta < 1000) {
-			usleep(1000 - delta);
+		if (empty && (i == ROM_SIZE - 1 || disassembledProgram[i][0] != '\0')) {
+			empty = false;
+			fprintf(disassembleFile, "%04X\n", (i == ROM_SIZE - 1 ? i : i-1));
 		}
-		else {
-			printf("Cycle took too long: %ld microseconds\n", delta);
+		if (disassembledProgram[i][0] != '\0') {
+			fprintf(disassembleFile, "%04X\t", i);
+			fputs(disassembledProgram[i], disassembleFile);
+			fputc('\n', disassembleFile);
 		}
 	}
-	if (outfile != stdout) fclose(outfile);
+}
+
+const int BLOCKS_PER_SECOND = 120;
+const int CYCLES_PER_BLOCK = CLOCK_SPEED / BLOCKS_PER_SECOND;
+const uint64_t MICROSECONDS_PER_BLOCK = 1000000 / BLOCKS_PER_SECOND;
+
+void run8080(State8080* state, Machine* machine) {
+	if (DEBUG) initPcLogFile();
+	if (DISASSEMBLE) initDisassembleFile();
+	uint64_t cycles;
+	int64_t last = 0;
+	
+	while (state->on) {
+		if (currMicro() - last > MICROSECONDS_PER_BLOCK) {
+			cycles = 0;
+		}
+		if (cycles < CYCLES_PER_BLOCK) {
+			last = currMicro();
+			while (cycles < CYCLES_PER_BLOCK) {
+				cycles += nextOp8080(state, machine);
+			}
+		}
+	}
+	
+	if (DEBUG) cleanPcLogFile();
+	if (DISASSEMBLE) {
+		outputDisassembly();
+		cleanDisassembleFile();
+	}
 }

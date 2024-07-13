@@ -3,3 +3,4 @@ disassemble-old.c
 memdump
 pgdump
 test.c
+myshika-memdump

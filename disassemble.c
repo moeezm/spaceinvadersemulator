@@ -4,7 +4,7 @@
 #include <errno.h>
 #include <stdint.h>
 
-#define pp(...) fprintf(outfile, __VA_ARGS__)
+#define pp(...) sprintf(buffer, __VA_ARGS__)
 
 #include "disassemble.h"
 
@@ -18,7 +18,7 @@ static u16 combine8(u8 lo, u8 hi) {
 	return lo + ((u16)hi << 8);
 }
 
-int disassemble8080(FILE* outfile, u8 op, u8 d1, u8 d2, u16 pc) {
+int disassemble8080(char* buffer, u8 op, u8 d1, u8 d2, u16 pc) {
 	int opsz = 1;
 	// pickin out various parts of the opcode
 	// reg1 and reg2 are three bits long, where 8 bits are bb-reg1-reg2
@@ -198,7 +198,7 @@ int disassemble8080(FILE* outfile, u8 op, u8 d1, u8 d2, u16 pc) {
 				case 0x1:
 				{
 					// LXI rp, data
-					pp("LXI \t%-4s\t%02X  ", dregs[rp], combine8(d1, d2));
+					pp("LXI \t%-4s\t%04X", dregs[rp], combine8(d1, d2));
 					opsz += 2;
 					goto end; 
 				}
@@ -255,7 +255,7 @@ int disassemble8080(FILE* outfile, u8 op, u8 d1, u8 d2, u16 pc) {
 	// move register to register
 	if (f2 == 1) {
 		// MOV r1, r2
-		pp("MOV \t%-3s,\t%-4s", regs[reg1], regs[reg1]); 
+		pp("MOV \t%-3s,\t%-4s", regs[reg1], regs[reg2]); 
 		goto end; 
 	}
 	// single register operations

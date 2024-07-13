@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <string.h>
 #include <assert.h>
+#include <stdlib.h>
 #include "machine.h"
 #include "emulate8080.h"
 
@@ -22,48 +23,82 @@ void writePort(Machine* mach, u8 port, u8 val) {
 		case 2: mach->wport2 = val & 0x7; break; // first 3 bits
 		case 4: mach->wport4 = (mach->wport4>>8) | ((u16)val << 8); break;
 	}
-	// update rport3
+	// update rport3 to do the shift register stuff
 	mach->rports[3] = (mach->wport4 >> (8 - mach->wport2)) & 0xFF;
 }
 
 Machine* initMachine() {
-	Machine* m;
+	Machine* m = malloc(sizeof(Machine));
 	memset(m->rports, 0, 4);
 	m->wport2 = 0;
 	m->wport4 = 0;
 	return m;
 }
 
-void machineKeyToggle(Machine* mach, enum MKey key) {
+void machineKeyDown(Machine* mach, enum MKey key) {
 	switch (key) {
+		case MK_COIN:
+			mach->rports[1] |= 1;
+			break;
 		case MK_2P_START:
-			mach->rports[1] ^= (1<<1);
+			mach->rports[1] |= (1<<1);
 			break;
 		case MK_1P_START:
-			mach->rports[1] ^= (1<<2);
+			mach->rports[1] |= (1<<2);
 			break;
 		case MK_1P_SHOT:
-			mach->rports[1] ^= (1<<4);
+			mach->rports[1] |= (1<<4);
 			break;
 		case MK_1P_LEFT:
-			mach->rports[1] ^= (1<<5);
+			mach->rports[1] |= (1<<5);
 			break;
 		case MK_1P_RIGHT:
-			mach->rports[1] ^= (1<<6);
+			mach->rports[1] |= (1<<6);
 			break;
 		case MK_2P_SHOT:
-			mach->rports[2] ^= (1<<4);
+			mach->rports[2] |= (1<<4);
 			break;
 		case MK_2P_LEFT:
-			mach->rports[2] ^= (1<<5);
+			mach->rports[2] |= (1<<5);
 			break;
 		case MK_2P_RIGHT:
-			mach->rports[2] ^= (1<<6);
+			mach->rports[2] |= (1<<6);
 			break;
 	}
 }
 
-//void rotateScreen(u8 input[SCREEN_WIDTH][SCREEN_HEIGHT/8], int output[SCREEN_WIDTH][SCREEN_HEIGHT]) {
+void machineKeyUp(Machine* mach, enum MKey key) {
+	switch (key) {
+		case MK_COIN:
+			mach->rports[1] &= ~1;
+			break;
+		case MK_2P_START:
+			mach->rports[1] &= ~(1<<1);
+			break;
+		case MK_1P_START:
+			mach->rports[1] &= ~(1<<2);
+			break;
+		case MK_1P_SHOT:
+			mach->rports[1] &= ~(1<<4);
+			break;
+		case MK_1P_LEFT:
+			mach->rports[1] &= ~(1<<5);
+			break;
+		case MK_1P_RIGHT:
+			mach->rports[1] &= ~(1<<6);
+			break;
+		case MK_2P_SHOT:
+			mach->rports[2] &= ~(1<<4);
+			break;
+		case MK_2P_LEFT:
+			mach->rports[2] &= ~(1<<5);
+			break;
+		case MK_2P_RIGHT:
+			mach->rports[2] &= ~(1<<6);
+			break;
+	}
+}
+
 void rotateScreen(u8 input[SCREEN_WIDTH][SCREEN_HEIGHT/8], int output[SCREEN_HEIGHT][SCREEN_WIDTH]) {
 	// VRAM is bytes [0x2400, 0x4000)
 	// each byte is 8 pixels
@@ -78,7 +113,7 @@ void rotateScreen(u8 input[SCREEN_WIDTH][SCREEN_HEIGHT/8], int output[SCREEN_HEI
 	for (int i = 0; i < SCREEN_WIDTH; i++) {
 		for (int j = 0; j < SCREEN_HEIGHT; j++) {
 			k = j/8; b = j%8;
-			output[SCREEN_HEIGHT - j][i] = (input[i][k]>>(8-b))&1;
+			output[SCREEN_HEIGHT - j][i] = (input[i][k]>>(b))&1;
 		}
 	}
 }

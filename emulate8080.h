@@ -6,6 +6,11 @@
 
 #define MEM_SZ (1<<16)
 #define CLOCK_SPEED 2000000
+
+#define DEBUG false 
+#define DISASSEMBLE true
+#define SPACE_INVADERS_MEM_SAFETY false
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 
@@ -23,7 +28,7 @@ typedef struct State8080 {
 	volatile u8 interruptbus[3]; // op, optional data1 and data2
 	bool interrupted;
 	bool halted;
-	u8 memory[MEM_SZ];
+	u8 memory[MEM_SZ+2];
 	bool interruptsEnabled;
 	volatile bool on;
 } State8080;
@@ -31,9 +36,15 @@ typedef struct State8080 {
 #include "machine.h"
 
 State8080* initState8080();
-void writeMem(State8080* state, u16 addr, u8 val);
+static inline void writeMem(State8080* state, u16 addr, u8 val);
 void generateInterrupt(State8080* state, u8 opcode, u8 data1, u8 data2);
 int emulateOp8080(State8080* state, Machine* machine, u8 op, u8 d1, u8 d2);
 int nextOp8080(State8080* state, Machine* machine);
 void run8080(State8080* state, Machine* machine);
+
+void initPcLogFile();
+void initDisassembleFile();
+void cleanPcLogFile();
+void cleanDisassembleFile();
+void outputDisassembly();
 #endif

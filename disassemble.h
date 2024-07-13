@@ -6,6 +6,6 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 
-int disassemble8080(FILE* outfile, u8 op, u8 d1, u8 d2, u16 pc);
+int disassemble8080(char* buffer, u8 op, u8 d1, u8 d2, u16 pc);
 
 #endif

@@ -12,44 +12,34 @@
 #include "machine.h"
 #include "platform.h"
 
-#define PIXEL_SIZE 2
-#define GRID_THICK 0
-#define _convertX(x) (((GRID_THICK) + (PIXEL_SIZE))*(x) + (GRID_THICK))
-#define _convertY(y) (((GRID_THICK) + (PIXEL_SIZE))*(y) + (GRID_THICK))
+#define PIXEL_SIZE_X 2
+#define PIXEL_SIZE_Y 3
 
 #define VRAM_START 0x2400
 
 #define FPS 60
 
+struct timeval tv;
 int64_t currMicro() {
-	struct timeval tv;
 	gettimeofday(&tv, NULL);
-	int64_t t = (tv.tv_sec)*1000000 + tv.tv_usec;
-	return t;
+	return (tv.tv_sec)*1000000 + tv.tv_usec;
+}
+
+struct timespec ts;
+int64_t currNano() {
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000000L + ts.tv_nsec;
 }
 
 State8080* cpu;
 Machine* machine;
 
-const int WINDOW_WIDTH = _convertX(SCREEN_WIDTH);
-const int WINDOW_HEIGHT = _convertY(SCREEN_HEIGHT);
+const int WINDOW_WIDTH = PIXEL_SIZE_X * SCREEN_WIDTH;
+const int WINDOW_HEIGHT = PIXEL_SIZE_Y * SCREEN_HEIGHT;
 
 Uint32* pixels; // actually displayed screen
 SDL_Window* window;
 SDL_Surface* surface;
-
-void setPixel(int x, int y, Uint32 color) {
-	assert(color == 1 || color == 0);
-	if (color == 1) {
-		color = 0xFFFFFFFF;
-	}
-	int start = _convertY(y)*WINDOW_WIDTH + _convertX(x);
-	for (int i = 0; i < PIXEL_SIZE; i++) {
-		for (int j = 0; j < PIXEL_SIZE; j++) {
-			pixels[start + i*WINDOW_WIDTH + j] = color;
-		}
-	}
-}
 
 void initWindow() {
 	printf("%d x %d\n", WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -95,11 +85,6 @@ bool loadFile(char* filename, int location) {
 	return true;
 }
 
-void* cpuThreadWrapper(void* arg) {
-	run8080(cpu, machine);
-	pthread_exit(NULL);
-}
-
 int main() {
 	cpu = initState8080();
 	machine = initMachine();
@@ -117,55 +102,147 @@ int main() {
 
 	bool running = true;
 
-	pthread_t thread;
-	pthread_create(&thread, NULL, cpuThreadWrapper, NULL);
-	const uint64_t MICROSECONDS_PER_FRAME = 1000000 / FPS;
+	const int MICROSECONDS_PER_FRAME = 1000000 / FPS;
+	const int64_t NANOSECONDS_PER_FRAME = 1000000000L / FPS;
+	const int CLOCKS_PER_FRAME = CLOCK_SPEED / FPS;
+
 	uint64_t lastHalf = currMicro();
 	uint64_t lastFull = lastHalf + MICROSECONDS_PER_FRAME / 2;
-	uint64_t curr;
+	int64_t curr;
+	int64_t cycles = 0;
+	int64_t last = 0;
 
 	u8 vRamCopy[SCREEN_WIDTH][SCREEN_HEIGHT/8];
-	static int rotScreen[SCREEN_HEIGHT][SCREEN_WIDTH];
 	memset(vRamCopy, 0, sizeof(vRamCopy));
-	memset(rotScreen, 0, sizeof(rotScreen));
-	assert(sizeof(vRamCopy) == SCREEN_HEIGHT * SCREEN_WIDTH / 8); 
+
+	if (DISASSEMBLE) initDisassembleFile();
 	while (running) {
 		while (SDL_PollEvent(&e)) switch (e.type) {
 			case SDL_QUIT:
 				cpu->on = false;
 				running = 0;
 				break;
+			case SDL_KEYDOWN:
+				switch (e.key.keysym.scancode) {
+					case 225:
+						machineKeyDown(machine, MK_COIN);
+						break;
+					case 30:
+						machineKeyDown(machine, MK_1P_START);
+						break;
+					case 31:
+						machineKeyDown(machine, MK_2P_START);
+						break;
+					case 4:
+						machineKeyDown(machine, MK_1P_LEFT);
+						break;
+					case 7:
+						machineKeyDown(machine, MK_1P_RIGHT);
+						break;
+					case 26:
+						machineKeyDown(machine, MK_1P_SHOT);
+						break;
+					case 80:
+						machineKeyDown(machine, MK_2P_LEFT);
+						break;
+					case 79:
+						machineKeyDown(machine, MK_2P_RIGHT);
+						break;
+					case 82:
+						machineKeyDown(machine, MK_2P_SHOT);
+						break;
+				}
+				break;
+			case SDL_KEYUP:
+				switch (e.key.keysym.scancode) {
+					case 225:
+						machineKeyUp(machine, MK_COIN);
+						break;
+					case 22:
+						machineKeyUp(machine, MK_1P_START);
+						break;
+					case 4:
+						machineKeyUp(machine, MK_1P_LEFT);
+						break;
+					case 7:
+						machineKeyUp(machine, MK_1P_RIGHT);
+						break;
+					case 26:
+						machineKeyUp(machine, MK_1P_SHOT);
+						break;
+					case 81:
+						machineKeyUp(machine, MK_2P_START);
+						break;
+					case 80:
+						machineKeyUp(machine, MK_2P_LEFT);
+						break;
+					case 79:
+						machineKeyUp(machine, MK_2P_RIGHT);
+						break;
+					case 82:
+						machineKeyUp(machine, MK_2P_SHOT);
+						break;
+				}
+				break;
 		}
-		curr = currMicro();
-		memcpy(vRamCopy, cpu->memory + VRAM_START, SCREEN_HEIGHT * SCREEN_WIDTH / 8);
-		rotateScreen(vRamCopy, rotScreen);
-		if (curr - lastHalf >= MICROSECONDS_PER_FRAME) {
-			// draw top half of frame (first 96 lines)
+		
+		if (currMicro() - lastHalf >= MICROSECONDS_PER_FRAME) {
+			memcpy(vRamCopy, cpu->memory + VRAM_START, SCREEN_HEIGHT * SCREEN_WIDTH / 8);
+			// rotate
+			Uint32 pixel;
 			for (int i = 0; i < 96; i++) {
-				for (int j = 0; j < SCREEN_WIDTH; j++) {
-					setPixel(j, i, rotScreen[i][j]);
+				for (int j = 0; j < SCREEN_HEIGHT; j++) {
+					pixel = (vRamCopy[i][j/8]>>(j%8) & 1) == 1 ? 0xFFFFFFFF : 0;
+					for (int k = 0; k < PIXEL_SIZE_Y; k++) {
+						for (int l = 0; l < PIXEL_SIZE_X; l++) {
+							pixels[(PIXEL_SIZE_Y*(SCREEN_HEIGHT - 1 - j) + k) * WINDOW_WIDTH + (PIXEL_SIZE_X*i+l)] = pixel;
+						}
+					}
 				}
 			}
 			SDL_UpdateWindowSurface(window);
 			lastHalf = currMicro(); 
 			VBlankHalfInterrupt(cpu);
+			// lol
+			for (int i = 0; i < 1000; i++) nextOp8080(cpu, machine);
+
 		}
-		if (curr - lastFull >= MICROSECONDS_PER_FRAME) {
-			// draw bottom half of frame
-			for (int i = 96; i < SCREEN_HEIGHT; i++) {
-				for (int j = 0; j < SCREEN_WIDTH; j++) {
-					setPixel(j, i, rotScreen[i][j]);
+		if (currMicro() - lastFull >= MICROSECONDS_PER_FRAME) {
+			memcpy(vRamCopy, cpu->memory + VRAM_START, SCREEN_HEIGHT * SCREEN_WIDTH / 8);
+			// rotate
+			Uint32 pixel;
+			for (int i = 96; i < SCREEN_WIDTH; i++) {
+				for (int j = 0; j < SCREEN_HEIGHT; j++) {
+					pixel = (vRamCopy[i][j/8]>>(j%8) & 1) == 1 ? 0xFFFFFFFF : 0;
+					for (int k = 0; k < PIXEL_SIZE_Y; k++) {
+						for (int l = 0; l < PIXEL_SIZE_X; l++) {
+							pixels[(PIXEL_SIZE_Y*(SCREEN_HEIGHT - 1 - j) + k) * WINDOW_WIDTH + (PIXEL_SIZE_X*i+l)] = pixel;
+						}
+					}
 				}
 			}
 			SDL_UpdateWindowSurface(window);
 			lastFull = currMicro();
 			VBlankFullInterrupt(cpu);
+			
+			while (cycles < CYCLES_PER_BLOCK) {
+				cycles += nextOp8080(cpu, machine);
+			}
+			cycles = 0;
 		}
 	}
 	cleanWindow();
+	/*
 	// dump memory
-	FILE* f = fopen("memdump", "wb");
+	printf("dumping memory...\n");
+	FILE* f = fopen("myshika-memdump", "wb");
 	fwrite(cpu->memory, 1, MEM_SZ, f);
 	fclose(f);
+	printf("disassembling...\n");
+	*/
+	if (DISASSEMBLE) {
+		outputDisassembly();
+		cleanDisassembleFile();
+	}
 	return 0;
 }

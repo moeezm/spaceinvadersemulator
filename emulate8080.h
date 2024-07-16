@@ -8,7 +8,7 @@
 #define CLOCK_SPEED 2000000
 
 #define DEBUG false 
-#define DISASSEMBLE true
+#define DISASSEMBLE false
 #define SPACE_INVADERS_MEM_SAFETY false
 
 typedef uint8_t u8;
